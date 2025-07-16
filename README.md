@@ -1,0 +1,2 @@
+- nginx config is in /usr/local/nginx/conf/nginx.conf
+- nginx executable is in /usr/local/nginx/sbin
