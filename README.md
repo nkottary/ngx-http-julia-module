@@ -29,7 +29,13 @@ This is inpired by and very similar to OpenResty which implements a Lua language
 
 3. Open the `config` file and modify the `JULIA_DIR` variable to point to the julia binary directory on your computer. For example, I use julia 1.11.2, my julia binary directory is `~/.julia/juliaup/julia-1.11.2+0.x64.linux.gnu`.
 
-3. Build the nginx binary. We will build our module into nginx. There are ways to build the Julia module separately and link the binary to nginx, but that is yet to be explored. Navigate to the nginx-1.21.3 directory and run:
+4. Configure nginx build environment. Run `configure` with the `--add-module` option:
+
+```
+./configure --add-module=modules/ngx_http_julia_module
+```
+
+5. Build the nginx binary. We will build our module into nginx. There are ways to build the Julia module separately and link the binary to nginx, but that is yet to be explored. Navigate to the nginx-1.21.3 directory and run:
   ```
   configure
   make

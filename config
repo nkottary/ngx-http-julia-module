@@ -1,6 +1,6 @@
 ngx_addon_name=ngx_http_julia_module
 
-JULIA_DIR=/home/nishanth/.julia/juliaup/julia-1.11.2+0.x64.linux.gnu
+JULIA_DIR=/home/nishanth/.julia/juliaup/julia-1.11.5+0.x64.linux.gnu
 CORE_LIBS="$CORE_LIBS -L$JULIA_DIR/lib -Wl,-rpath,$JULIA_DIR/lib -ljulia"
 if test -n "$ngx_module_link"; then
     ngx_module_type=HTTP
