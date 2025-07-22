@@ -9,8 +9,9 @@ static char *ngx_http_julia(ngx_conf_t *cf, void *post, void *data);
 
 static ngx_conf_post_handler_pt ngx_http_julia_p = ngx_http_julia;
 
+// The config is just some julia code as a string
 typedef struct {
-    ngx_str_t   name;
+    ngx_str_t   code;
 } ngx_http_julia_loc_conf_t;
 
 static void *
@@ -27,24 +28,26 @@ ngx_http_julia_create_loc_conf(ngx_conf_t *cf)
 }
 
 static ngx_command_t ngx_http_julia_commands[] = {
-    { ngx_string("content_by_julia"),
-      NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_julia_loc_conf_t, name),
-      &ngx_http_julia_p },
-
-    { ngx_string("access_by_julia"),
-      NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
-      NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_julia_loc_conf_t, name),
-      &ngx_http_julia_p },
+    {
+         ngx_string("content_by_julia"),
+         NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+         ngx_conf_set_str_slot,
+         NGX_HTTP_LOC_CONF_OFFSET,
+         offsetof(ngx_http_julia_loc_conf_t, code),
+         &ngx_http_julia_p
+    },
+    {
+         ngx_string("access_by_julia"),
+         NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+         ngx_conf_set_str_slot,
+         NGX_HTTP_LOC_CONF_OFFSET,
+         offsetof(ngx_http_julia_loc_conf_t, code),
+         &ngx_http_julia_p
+    },
     ngx_null_command
 };
 
 
-static ngx_str_t julia_string;
 static ngx_http_module_t ngx_http_julia_module_ctx = {
     NULL,                          /* preconfiguration */
     NULL,                          /* postconfiguration */
@@ -81,9 +84,13 @@ ngx_http_julia_handler(ngx_http_request_t *r)
     ngx_chain_t  out;
 
     size_t sz;
-    char *strtmp = ngx_pcalloc(r->pool,julia_string.len);
-    strncpy(strtmp, (char*) julia_string.data,julia_string.len);
-    strtmp[julia_string.len] = '\0';
+
+    // The the julia code from config and convert it to a regular c string
+    // to be passed to julia_eval_string
+    ngx_http_julia_loc_conf_t *juliacf = ngx_http_get_module_loc_conf(r, ngx_http_julia_module);
+    char *strtmp = ngx_pcalloc(r->pool, juliacf->code.len);
+    strncpy(strtmp, (char*) juliacf->code.data, juliacf->code.len);
+    strtmp[juliacf->code.len] = '\0';
 
     char *args = ngx_pcalloc(r->pool,r->args.len);
     strncpy(args, (char*) r->args.data,r->args.len);
@@ -94,17 +101,11 @@ ngx_http_julia_handler(ngx_http_request_t *r)
 
     /* run Julia commands */
     jl_value_t *ret = jl_eval_string(strtmp);
-    //ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "strtmp is %s \n", strtmp);
-    //ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "julia_string.data is %s \n", julia_string.data);
-    //ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "julia_string.len is %d \n", julia_string.len);
-    //ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "args is %s \n", args);
 
-    if (jl_typeis(ret, jl_float64_type)) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Received float type answer");
-        double ret_unboxed = jl_unbox_float64(ret);
-        sprintf(strout, "%e \n", ret_unboxed);
-    }
-    else {
+    if (jl_typeis(ret, jl_string_type)) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Received string type answer");
+        sprintf(strout, "%s \n", jl_string_data(ret));
+    } else {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Unexpected return type");
         sprintf(strout, "ERROR: unexpected return type\n");
     }
@@ -146,8 +147,6 @@ ngx_http_julia(ngx_conf_t *cf, void *post, void *data)
     if (ngx_strcmp(name->data, "") == 0) {
         return NGX_CONF_ERROR;
     }
-    julia_string.data = name->data;
-    julia_string.len = ngx_strlen(julia_string.data);
 
     return NGX_CONF_OK;
 }
