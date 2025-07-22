@@ -95,9 +95,18 @@ ngx_http_julia_handler(ngx_http_request_t *r)
     char *args = ngx_pcalloc(r->pool,r->args.len);
     strncpy(args, (char*) r->args.data,r->args.len);
 
-    char *strout = ngx_pcalloc(r->pool,100);
+    char *strout = ngx_pcalloc(r->pool, 1024);
     /* required: setup the Julia context */
     jl_init();
+
+    // Pass a string as a global variable from c to julia
+    jl_sym_t *var = jl_symbol("ngx_req_headers");
+    jl_binding_t *bp = jl_get_binding_wr(jl_main_module, var, 1);
+    jl_value_t* headers_array_type = jl_apply_array_type((jl_value_t*)jl_uint8_type, 1);
+    jl_array_t* headers_array = jl_alloc_array_1d(headers_array_type, 1024);
+    char *headers_c_array = jl_array_data(headers_array, char);
+    strcpy(headers_c_array, "{ 'name': 'Nish' }");
+    jl_checked_assignment(bp, jl_main_module, var, (jl_value_t *)headers_array);
 
     /* run Julia commands */
     jl_value_t *ret = jl_eval_string(strtmp);
