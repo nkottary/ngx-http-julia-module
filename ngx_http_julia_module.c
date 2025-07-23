@@ -105,6 +105,56 @@ const char *build_headers_list(ngx_list_part_t *part)
     return ret;
 }
 
+char *setup_global_var(char var_name[], size_t sz)
+{
+    jl_sym_t *var = jl_symbol(var_name);
+    jl_binding_t *bp = jl_get_binding_wr(jl_main_module, var, 1);
+    jl_value_t* headers_array_type = jl_apply_array_type((jl_value_t*)jl_uint8_type, 1);
+    jl_array_t* headers_array = jl_alloc_array_1d(headers_array_type, sz);
+    char *headers_c_array = jl_array_data(headers_array, char);
+    jl_checked_assignment(bp, jl_main_module, var, (jl_value_t *)headers_array);
+
+    return headers_c_array;
+}
+
+int build_response_headers(const char *raw_headers, ngx_list_part_t *part, ngx_log_t *log)
+{
+    // Check existing headers in part
+    // Parse raw_headers to json object
+    printf("Contents of raw_headers: \n");
+    json_object *jarray = json_tokener_parse(raw_headers);
+    int arraylen = json_object_array_length(jarray);
+    enum json_type type;
+    type = json_object_get_type(jarray);
+    if (type != json_type_array) {
+        ngx_log_error(NGX_LOG_ERR, log, 0, "Expected array but got %s", type);
+        json_object_put(jarray);
+        return 0;
+    }
+    for (int i = 0; i < arraylen; i++) {
+        json_object *jvalue = json_object_array_get_idx(jarray, i);
+        type = json_object_get_type(jvalue);
+        if (type != json_type_object) {
+            ngx_log_error(NGX_LOG_ERR, log, 0, "Expected object but got %s", type);
+            json_object_put(jarray);
+            return 0;
+        }
+        json_object_object_foreach(jvalue, key, val) {
+            type = json_object_get_type(val);
+            if (type != json_type_string) {
+                ngx_log_error(NGX_LOG_ERR, log, 0, "Expected string but got %s", type);
+                json_object_put(jarray);
+                return 0;
+            }
+            const char *value = json_object_get_string(val);
+            printf("Key: %s, Value: %s\n", key, value);
+        }
+    }
+    // Overwrite headers in part with raw_headers
+    json_object_put(jarray);
+    return 1;
+}
+
 static ngx_int_t
 ngx_http_julia_handler(ngx_http_request_t *r)
 {
@@ -128,15 +178,13 @@ ngx_http_julia_handler(ngx_http_request_t *r)
     jl_init();
 
     // Pass a string as a global variable from c to julia
-    jl_sym_t *var = jl_symbol("ngx_req_headers");
-    jl_binding_t *bp = jl_get_binding_wr(jl_main_module, var, 1);
-    jl_value_t* headers_array_type = jl_apply_array_type((jl_value_t*)jl_uint8_type, 1);
+    const char *req_headers_json = build_headers_list(&r->headers_in.headers.part);
+    char *req_headers_c_array = setup_global_var("ngx_req_headers", strlen(req_headers_json));
+    strcpy(req_headers_c_array, req_headers_json);
 
-    const char *headers_json = build_headers_list(&r->headers_in.headers.part);
-    jl_array_t* headers_array = jl_alloc_array_1d(headers_array_type, strlen(headers_json));
-    char *headers_c_array = jl_array_data(headers_array, char);
-    strcpy(headers_c_array, headers_json);
-    jl_checked_assignment(bp, jl_main_module, var, (jl_value_t *)headers_array);
+
+    // setup ngx_resp_headers
+    char *resp_headers_c_array = setup_global_var("ngx_resp_headers", 1024);
 
     /* run Julia commands */
     jl_value_t *ret = jl_eval_string(strtmp);
@@ -148,22 +196,20 @@ ngx_http_julia_handler(ngx_http_request_t *r)
         jl_call1(showf, exception);
         jl_print_backtrace();
     } else if (jl_typeis(ret, jl_string_type)) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Received string type answer");
-        sprintf(strout, "%s \n", jl_string_data(ret));
+        strcpy(strout, jl_string_data(ret));
     } else {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Unexpected return type");
         sprintf(strout, "ERROR: unexpected return type\n");
     }
 
-    /* strongly recommended: notify Julia that the
-         program is about to terminate. this allows
-         Julia time to cleanup pending write requests
-         and run all finalizers
-    */
+    // Exit julia
     jl_atexit_hook(0);
     sz = strlen(strout);
 
 
+    if (!build_response_headers(resp_headers_c_array, &r->headers_out.headers.part, r->connection->log)){
+        // Invalid header structure received
+    }
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.content_length_n = sz;
     ngx_http_send_header(r);
