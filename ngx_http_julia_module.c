@@ -141,9 +141,12 @@ ngx_http_julia_handler(ngx_http_request_t *r)
     /* run Julia commands */
     jl_value_t *ret = jl_eval_string(strtmp);
 
-    if (jl_exception_occurred()) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%s \n", jl_typeof_str(jl_exception_occurred()));
-        //jl_print_backtrace();
+    jl_value_t *exception = jl_exception_occurred();
+    if (exception) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%s \n", jl_typeof_str(exception));
+        jl_value_t *showf = jl_get_function(jl_base_module, "show");
+        jl_call1(showf, exception);
+        jl_print_backtrace();
     } else if (jl_typeis(ret, jl_string_type)) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Received string type answer");
         sprintf(strout, "%s \n", jl_string_data(ret));
