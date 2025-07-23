@@ -1,8 +1,10 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <json-c/json.h>
 
 #include <julia.h>
+#include <stdio.h>
 
 
 static char *ngx_http_julia(ngx_conf_t *cf, void *post, void *data);
@@ -77,6 +79,32 @@ ngx_module_t ngx_http_julia_module = {
     NGX_MODULE_V1_PADDING
 };
 
+const char *build_headers_list(ngx_list_part_t *part)
+{
+    void *v = part->elts;
+    json_object *jarray = json_object_new_array();
+    for (ngx_uint_t i = 0; ; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            v = part->elts;
+            i = 0;
+        }
+
+        ngx_table_elt_t elt = ((ngx_table_elt_t *)v)[i];
+
+        json_object *jobj = json_object_new_object();
+        json_object *value_string = json_object_new_string((char *)elt.value.data);
+        json_object_object_add(jobj, (char *)elt.key.data, value_string);
+        json_object_array_add(jarray, jobj);
+    }
+    const char *ret = strdup(json_object_to_json_string_ext(jarray, JSON_C_TO_STRING_NOSLASHESCAPE));
+    json_object_put(jarray);
+    return ret;
+}
+
 static ngx_int_t
 ngx_http_julia_handler(ngx_http_request_t *r)
 {
@@ -103,15 +131,20 @@ ngx_http_julia_handler(ngx_http_request_t *r)
     jl_sym_t *var = jl_symbol("ngx_req_headers");
     jl_binding_t *bp = jl_get_binding_wr(jl_main_module, var, 1);
     jl_value_t* headers_array_type = jl_apply_array_type((jl_value_t*)jl_uint8_type, 1);
-    jl_array_t* headers_array = jl_alloc_array_1d(headers_array_type, 1024);
+
+    const char *headers_json = build_headers_list(&r->headers_in.headers.part);
+    jl_array_t* headers_array = jl_alloc_array_1d(headers_array_type, strlen(headers_json));
     char *headers_c_array = jl_array_data(headers_array, char);
-    strcpy(headers_c_array, "{ 'name': 'Nish' }");
+    strcpy(headers_c_array, headers_json);
     jl_checked_assignment(bp, jl_main_module, var, (jl_value_t *)headers_array);
 
     /* run Julia commands */
     jl_value_t *ret = jl_eval_string(strtmp);
 
-    if (jl_typeis(ret, jl_string_type)) {
+    if (jl_exception_occurred()) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "%s \n", jl_typeof_str(jl_exception_occurred()));
+        //jl_print_backtrace();
+    } else if (jl_typeis(ret, jl_string_type)) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Received string type answer");
         sprintf(strout, "%s \n", jl_string_data(ret));
     } else {
