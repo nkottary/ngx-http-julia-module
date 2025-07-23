@@ -1,6 +1,3 @@
-- nginx config is in /usr/local/nginx/conf/nginx.conf
-- nginx executable is in /usr/local/nginx/sbin
-
 # Julia language extension for Nginx
 
 Use the julia language from inside nginx config. You can place code snippets that can also `include()` julia files. You can receive HTTP header and body data from requests and also send HTTP responses from julia.
