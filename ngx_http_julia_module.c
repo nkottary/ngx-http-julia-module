@@ -131,6 +131,10 @@ void setup_global_pointer(char name[], void *ptr)
 // Parses headers sent back by julia as json. Inserts them to the nginx headers_out list
 int build_response_headers(const char *raw_headers, ngx_http_request_t *req)
 {
+    if (raw_headers[0] == '\0') {
+        // Nothing to do, skip
+        return 1;
+    }
     json_object *jarray = json_tokener_parse(raw_headers);
     int arraylen = json_object_array_length(jarray);
     enum json_type type;
@@ -207,7 +211,7 @@ get_body_data()
         p = ngx_copy(p, cl->buf->pos, size);
         rest -= size;
     }
-    p = '\0';
+    buf[len] = '\0';
 
     return buf;
 }
@@ -231,7 +235,6 @@ int read_body()
 {
     jl_value_t *ret = jl_eval_string("req_ptr");
     ngx_http_request_t *r = (ngx_http_request_t *)jl_unbox_uint64(ret);
-    printf("Successfully got pointer to request\n");
     ngx_int_t rc = ngx_http_read_client_request_body(r, ngx_http_julia_read_request_body);
     if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
         return 0;
