@@ -79,6 +79,8 @@ ngx_module_t ngx_http_julia_module = {
     NGX_MODULE_V1_PADDING
 };
 
+// Convert nginx headers_in list to a json string that can be
+// sent to julia
 const char *build_headers_list(ngx_list_part_t *part)
 {
     void *v = part->elts;
@@ -105,6 +107,7 @@ const char *build_headers_list(ngx_list_part_t *part)
     return ret;
 }
 
+// Setup a julia global Vector{UInt8} of the given size
 char *setup_global_var(char var_name[], size_t sz)
 {
     jl_sym_t *var = jl_symbol(var_name);
@@ -117,17 +120,15 @@ char *setup_global_var(char var_name[], size_t sz)
     return headers_c_array;
 }
 
-int build_response_headers(const char *raw_headers, ngx_list_part_t *part, ngx_log_t *log)
+// Parses headers sent back by julia as json. Inserts them to the nginx headers_out list
+int build_response_headers(const char *raw_headers, ngx_http_request_t *req)
 {
-    // Check existing headers in part
-    // Parse raw_headers to json object
-    printf("Contents of raw_headers: \n");
     json_object *jarray = json_tokener_parse(raw_headers);
     int arraylen = json_object_array_length(jarray);
     enum json_type type;
     type = json_object_get_type(jarray);
     if (type != json_type_array) {
-        ngx_log_error(NGX_LOG_ERR, log, 0, "Expected array but got %s", type);
+        ngx_log_error(NGX_LOG_ERR, req->connection->log, 0, "Expected array but got %s", type);
         json_object_put(jarray);
         return 0;
     }
@@ -135,22 +136,29 @@ int build_response_headers(const char *raw_headers, ngx_list_part_t *part, ngx_l
         json_object *jvalue = json_object_array_get_idx(jarray, i);
         type = json_object_get_type(jvalue);
         if (type != json_type_object) {
-            ngx_log_error(NGX_LOG_ERR, log, 0, "Expected object but got %s", type);
+            ngx_log_error(NGX_LOG_ERR, req->connection->log, 0, "Expected object but got %s", type);
             json_object_put(jarray);
             return 0;
         }
         json_object_object_foreach(jvalue, key, val) {
             type = json_object_get_type(val);
             if (type != json_type_string) {
-                ngx_log_error(NGX_LOG_ERR, log, 0, "Expected string but got %s", type);
+                ngx_log_error(NGX_LOG_ERR, req->connection->log, 0, "Expected string but got %s", type);
                 json_object_put(jarray);
                 return 0;
             }
             const char *value = json_object_get_string(val);
-            printf("Key: %s, Value: %s\n", key, value);
+            ngx_table_elt_t *new = (ngx_table_elt_t *)ngx_list_push(&req->headers_out.headers);
+            char *keycopy = (char *)ngx_pcalloc(req->pool, sizeof(char) * strlen(key));
+            strcpy(keycopy, key);
+            char *valuecopy = (char *)ngx_pcalloc(req->pool, sizeof(char) * strlen(value));
+            strcpy(valuecopy, value);
+            new->key.data = (u_char *)keycopy;
+            new->key.len = strlen(keycopy);
+            new->value.data = (u_char *)valuecopy;
+            new->value.len = strlen(valuecopy);
         }
     }
-    // Overwrite headers in part with raw_headers
     json_object_put(jarray);
     return 1;
 }
@@ -207,8 +215,8 @@ ngx_http_julia_handler(ngx_http_request_t *r)
     sz = strlen(strout);
 
 
-    if (!build_response_headers(resp_headers_c_array, &r->headers_out.headers.part, r->connection->log)){
-        // Invalid header structure received
+    if (!build_response_headers(resp_headers_c_array, r)){
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to process headers_out");
     }
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.content_length_n = sz;
