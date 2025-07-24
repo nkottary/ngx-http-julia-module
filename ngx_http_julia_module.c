@@ -120,6 +120,14 @@ char *setup_global_var(char var_name[], size_t sz)
     return headers_c_array;
 }
 
+void setup_global_pointer(char name[], void *ptr)
+{
+    jl_sym_t *var = jl_symbol(name);
+    jl_binding_t *bp = jl_get_binding_wr(jl_main_module, var, 1);
+    jl_value_t *jl_ptr = jl_box_int64((unsigned long int)ptr);
+    jl_checked_assignment(bp, jl_main_module, var, jl_ptr);
+}
+
 // Parses headers sent back by julia as json. Inserts them to the nginx headers_out list
 int build_response_headers(const char *raw_headers, ngx_http_request_t *req)
 {
@@ -163,39 +171,136 @@ int build_response_headers(const char *raw_headers, ngx_http_request_t *req)
     return 1;
 }
 
+u_char *
+get_body_data()
+{
+    ngx_http_request_t *r;
+    off_t         len;
+    ngx_chain_t  *in;
+
+    jl_value_t *ret = jl_eval_string("req_ptr");
+    r = (ngx_http_request_t *)jl_unbox_uint64(ret);
+
+    if (r->request_body == NULL) {
+        return NULL;
+    }
+
+    // Get total length of content
+    len = 0;
+    for (in = r->request_body->bufs; in; in = in->next) {
+        len += ngx_buf_size(in->buf);
+    }
+    // Allocate buffer of that length
+    u_char *buf = ngx_pcalloc(r->pool, len);
+    if (buf == NULL) {
+        return NULL;
+    }
+
+    u_char *p = buf;
+    size_t size = 0, rest = len;
+    for (ngx_chain_t *cl = r->request_body->bufs; cl != NULL && rest > 0; cl = cl->next) {
+        size = ngx_buf_size(cl->buf);
+        if (size > rest) { /* reach limit*/
+            size = rest;
+        }
+
+        p = ngx_copy(p, cl->buf->pos, size);
+        rest -= size;
+    }
+    p = '\0';
+
+    return buf;
+}
+
+void
+ngx_http_julia_read_request_body(ngx_http_request_t *r)
+{
+    if (r->request_body == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+    ngx_http_finalize_request(r, NGX_OK);
+}
+
+int test_ccall(int x)
+{
+    return x + 1;
+}
+
+int read_body()
+{
+    jl_value_t *ret = jl_eval_string("req_ptr");
+    ngx_http_request_t *r = (ngx_http_request_t *)jl_unbox_uint64(ret);
+    printf("Successfully got pointer to request\n");
+    ngx_int_t rc = ngx_http_read_client_request_body(r, ngx_http_julia_read_request_body);
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
 static ngx_int_t
 ngx_http_julia_handler(ngx_http_request_t *r)
 {
-    ngx_buf_t   *b;
+    ngx_buf_t *b;
     ngx_chain_t  out;
-
     size_t sz;
 
-    // The the julia code from config and convert it to a regular c string
+    // Get julia code from config and convert it to a regular c string
     // to be passed to julia_eval_string
     ngx_http_julia_loc_conf_t *juliacf = ngx_http_get_module_loc_conf(r, ngx_http_julia_module);
     char *strtmp = ngx_pcalloc(r->pool, juliacf->code.len);
+    if (strtmp == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
     strncpy(strtmp, (char*) juliacf->code.data, juliacf->code.len);
     strtmp[juliacf->code.len] = '\0';
 
+    /*
     char *args = ngx_pcalloc(r->pool,r->args.len);
-    strncpy(args, (char*) r->args.data,r->args.len);
+    if (args == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+    */
 
     char *strout = ngx_pcalloc(r->pool, 1024);
+    if (strout == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
     /* required: setup the Julia context */
     jl_init();
+
+    // Request args
+    char *args = setup_global_var("ngx_req_args", r->args.len);
+    strncpy(args, (char*) r->args.data, r->args.len);
+
+    // Request uri
+    char *uri = setup_global_var("ngx_req_uri", r->uri.len);
+    strncpy(uri, (char*) r->uri.data, r->uri.len);
 
     // Pass a string as a global variable from c to julia
     const char *req_headers_json = build_headers_list(&r->headers_in.headers.part);
     char *req_headers_c_array = setup_global_var("ngx_req_headers", strlen(req_headers_json));
     strcpy(req_headers_c_array, req_headers_json);
 
+    jl_value_t *ret;
+    // Read body
+    // Add test_ccall function pointer to global
+    setup_global_pointer("test_ccall", &test_ccall);
+
+    // Try storing request as global in julia
+    setup_global_pointer("req_ptr", r);
+
+    setup_global_pointer("read_body", &read_body);
+    setup_global_pointer("get_body_data", &get_body_data);
+
 
     // setup ngx_resp_headers
     char *resp_headers_c_array = setup_global_var("ngx_resp_headers", 1024);
 
     /* run Julia commands */
-    jl_value_t *ret = jl_eval_string(strtmp);
+    ret = jl_eval_string(strtmp);
 
     jl_value_t *exception = jl_exception_occurred();
     if (exception) {
@@ -223,6 +328,9 @@ ngx_http_julia_handler(ngx_http_request_t *r)
     ngx_http_send_header(r);
 
     b = ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+    if (b == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
     out.buf = b;
     out.next = NULL;
 
